@@ -1,0 +1,78 @@
+#!/bin/bash
+
+# This script checks if a default ir_rsa key pair exists in your ~/.ssh folder.
+# If the key pair does already exist, it will be used to SSH into your newly created Azure IoT Edge Device (vm).
+# If not, the key pair will be created in the ~/.ssh folder
+#
+# The script then asks for a number of parameters like the resource group name and the location to create the vm.
+# The script also asks for a project name (prefix to create uniquely named resources) and an administrator username.
+
+# Pre-requisites: az login has already been executed with a valid Azure subscription
+RED='\e[0;31m'
+GREEN='\e[0;32m'
+RESET='\e[0m'
+
+# Set Environment Variables (default names) for the Resource Group, Location and IoT Hub
+AZ_RG="TMP-AZ-220-RG"
+AZ_HUB_NAME="AZ-220-HUB"
+AZ_LOC="westeurope"
+KEYFILE=~/.ssh/id_rsa
+
+# Ask the user for required options and check if they want to override default values
+OPTS=`getopt -n 'parse-options' -o hi:l:n: --long help,initials:,location:,username: -- "$@"`
+eval set -- "$OPTS"
+
+#extract options and their arguments into variables
+while true ; do
+        case "$1" in
+                -h | --help     ) break;;
+                -i | --initials ) INITIALS="$2"; shift 2 ;;
+                -l | --location ) AZ_LOC="$2"; shift 2 ;;
+                -n | --username ) USERNAME="$2"; shift 2 ;;
+                --)               shift; break ;;
+                *)                break;;
+        esac
+done
+
+if [ -z $INITIALS ] || [ -z $USERNAME ]
+then
+    echo -e "usage: ./create-iot-edge-vm.azcli ${RED}-i <initials> -n <VMUserName>${RESET} [-l <location>]"
+    exit 1
+fi
+
+echo -e "${GREEN}This script will run for several minutes${RESET}"
+
+# Check if a default ir_rsa key pair exists in your ~/.ssh folder. If not create them (and optionally the folder as well)
+if [ ! -f $KEYFILE ]
+then
+    if [ ! -d ${KEYFILE%/*} ]
+    then
+        echo -e "${GREEN}Creating ${KEYFILE%/*} folder${RESET}"
+        mkdir ${KEYFILE%/*}
+    fi
+    echo -e "${GREEN}Creating ${KEYFILE##*/} key pair${RESET}"
+    ssh-keygen -q -m PEM -t rsa -b 4096 -f $KEYFILE -N ''
+fi
+
+KEYFILENAME=$KEYFILE.pub
+
+AZ_HUB_NAME=$AZ_HUB_NAME-$INITIALS
+
+# Create a new Azure Resource Group if it doesn't yet exist
+if [ $(az group exists --name $AZ_RG) = false ]
+then
+    echo -e "${GREEN}Creating a new Azure Resource Group: $AZ_RG${RESET}"
+    az group create --name $AZ_RG --location $AZ_LOC
+fi
+
+# Create an Azure IoT Hub if it doesn't yet exists
+if [ ! $(az iot hub list -g $AZ_RG --query "[?name=='$AZ_HUB_NAME'].name" -o tsv) ]
+then
+    echo -e "${GREEN}Creating a new Azure IoT Hub: $AZ_HUB_NAME${RESET}"
+    az iot hub create -g $AZ_RG -n $AZ_HUB_NAME --sku S1
+fi
+
+# Create the Linux VM using an ARM template
+echo -e "${GREEN}Creating the new Linux VM${RESET}"
+az deployment group create -g $AZ_RG -f ./azure-iot-edge-template.json -p projectName="${INITIALS,,}" adminUsername=$USERNAME adminPublicKey="$(<$KEYFILENAME)" --verbose &&
+az vm show --resource-group $AZ_RG --name "$projectName-vm" --show-details --query publicIps --output tsv
